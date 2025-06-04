@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Linkbase Knowledge Graph</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { max-width: 1200px; margin: auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; }
+        .controls, .filters { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px; background-color: #f9f9f9; }
+        .controls label, .filters label { margin-right: 10px; font-weight: bold; display: inline-block; margin-bottom: 5px; }
+        .controls select, .controls input[type="text"], .controls input[type="number"], .controls button,
+        .filters select, .filters input[type="radio"], .filters button {
+            padding: 8px;
+            margin-right: 15px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            vertical-align: middle;
+        }
+        .filters select[multiple] { height: 100px; min-width: 200px; }
+        .controls button, .filters button { background-color: #3498db; color: white; cursor: pointer; border: none; }
+        .controls button:hover, .filters button:hover { background-color: #2980b9; }
+        .filter-group { margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px dashed #eee; }
+        .filter-group:last-child { border-bottom: none; }
+        .mermaid-diagram-container { 
+            width: 100%; 
+            min-height: 500px; height: 70vh; 
+            border: 1px solid #ddd; overflow: auto; background-color: #fff;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .mermaid { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        .mermaid svg { max-width: 100%; max-height: 100%; display: block; }
+        .status-message { margin-top: 10px; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Linkbase Knowledge Graph</h1>
+
+        <div class="controls">
+            <button id="btnLoadFullGraph">Load Full Graph</button>
+            <hr>
+            <label for="selCenterNode">Center on Node:</label>
+            <select id="selCenterNode"></select>
+            <label for="numNodeCentricDepth">Depth:</label>
+            <input type="number" id="numNodeCentricDepth" value="1" min="0" max="5"> 
+            <button id="btnLoadNodeCentric">Load Node-Centric Graph</button>
+            <hr>
+            <label for="selStartNode">Path Start Node:</label>
+            <select id="selStartNode"></select>
+            <label for="selEndNode">Path End Node:</label>
+            <select id="selEndNode"></select>
+            <label for="numMaxDepth">Max Depth:</label>
+            <input type="number" id="numMaxDepth" value="5" min="1" max="10">
+            <button id="btnLoadPathGraph">Load Path Graph</button>
+        </div>
+
+        <div class="filters">
+            <h3>Dynamic Filters (Applied to Current Graph)</h3>
+            <div class="filter-group">
+                <label for="selNodeFilterItems">Filter Nodes by Label/Name:</label><br>
+                <select multiple id="selNodeFilterItems"></select><br>
+                <input type="radio" name="nodeFilterMode" value="show_all" id="nodeFilterShowAll" checked> <label for="nodeFilterShowAll" style="font-weight:normal;">Show All</label>
+                <input type="radio" name="nodeFilterMode" value="whitelist" id="nodeFilterWhitelist"> <label for="nodeFilterWhitelist" style="font-weight:normal;">Show Only Selected</label>
+                <input type="radio" name="nodeFilterMode" value="blacklist" id="nodeFilterBlacklist"> <label for="nodeFilterBlacklist" style="font-weight:normal;">Hide Selected</label>
+            </div>
+            <div class="filter-group">
+                <label for="selEdgeFilterItems">Filter Edges by Label:</label><br>
+                <select multiple id="selEdgeFilterItems"></select><br>
+                <input type="radio" name="edgeFilterMode" value="show_all" id="edgeFilterShowAll" checked> <label for="edgeFilterShowAll" style="font-weight:normal;">Show All</label>
+                <input type="radio" name="edgeFilterMode" value="whitelist" id="edgeFilterWhitelist"> <label for="edgeFilterWhitelist" style="font-weight:normal;">Show Only Selected</label>
+                <input type="radio" name="edgeFilterMode" value="blacklist" id="edgeFilterBlacklist"> <label for="edgeFilterBlacklist" style="font-weight:normal;">Hide Selected</label>
+            </div>
+            <button id="btnApplyClientFilters">Apply Client Filters</button>
+            <button id="btnClearClientFilters">Clear Client Filters & Re-render</button>
+        </div>
+
+        <div class="mermaid-diagram-container" id="mermaidContainer">
+            <div class="mermaid" id="mermaidGraph">graph TD; A["Loading graph or select an option..."];</div>
+        </div>
+        <div id="statusMessage" class="status-message"></div>
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: false });
+
+        const mermaidGraphDiv = document.getElementById('mermaidGraph');
+        const statusMessageDiv = document.getElementById('statusMessage');
+        
+        const selCenterNode = document.getElementById('selCenterNode');
+        const selStartNode = document.getElementById('selStartNode');
+        const selEndNode = document.getElementById('selEndNode');
+        
+        const selNodeFilterItems = document.getElementById('selNodeFilterItems');
+        const selEdgeFilterItems = document.getElementById('selEdgeFilterItems');
+
+        let currentGraphData = { nodes: [], edges: [], center_node_id: null, start_node_id: null, end_node_id: null, error_message: null };
+        let currentApiUrlForReload = '/api/graph'; 
+
+        async function populateNodeDropdowns() {
+            statusMessageDiv.textContent = 'Loading node list...';
+            try {
+                const response = await fetch('/api/nodes');
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const nodes = await response.json();
+                
+                selCenterNode.innerHTML = '<option value="">Select Node</option>';
+                selStartNode.innerHTML = '<option value="">Select Start Node</option>';
+                selEndNode.innerHTML = '<option value="">Select End Node</option>';
+
+                nodes.forEach(node => {
+                    const optionText = `${node.name}${node.label ? ' (' + node.label + ')' : ''}`;
+                    selCenterNode.add(new Option(optionText, node.name));
+                    selStartNode.add(new Option(optionText, node.name));
+                    selEndNode.add(new Option(optionText, node.name));
+                });
+                statusMessageDiv.textContent = 'Node list loaded.';
+            } catch (error) {
+                console.error('Error fetching nodes:', error);
+                statusMessageDiv.textContent = `Error fetching nodes: ${error.message}`;
+            }
+        }
+
+        function updateFilterControls(nodes, edges) {
+            const uniqueNodeTexts = new Set();
+            if (nodes) {
+                nodes.forEach(node => {
+                    const displayVal = (node.label && String(node.label).trim() !== "") ? String(node.label) : String(node.name);
+                    uniqueNodeTexts.add(displayVal);
+                });
+            }
+            selNodeFilterItems.innerHTML = '';
+            Array.from(uniqueNodeTexts).sort().forEach(text => {
+                selNodeFilterItems.add(new Option(text, text));
+            });
+
+            const uniqueEdgeLabels = new Set();
+            if (edges) {
+                edges.forEach(edge => { if (edge.label && String(edge.label).trim() !== "") uniqueEdgeLabels.add(String(edge.label)); });
+            }
+            selEdgeFilterItems.innerHTML = '';
+            Array.from(uniqueEdgeLabels).sort().forEach(label => {
+                selEdgeFilterItems.add(new Option(label, label));
+            });
+            statusMessageDiv.textContent += ' Filter options updated.';
+        }
+        
+        async function loadAndRenderGraph(apiUrl) {
+            statusMessageDiv.textContent = 'Loading graph data...';
+            mermaidGraphDiv.innerHTML = 'graph TD; A["Loading..."];'; 
+            await mermaid.run({ nodes: [mermaidGraphDiv] }); 
+
+            try {
+                currentApiUrlForReload = apiUrl; 
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error structure" }));
+                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.detail || "Failed to fetch"}`);
+                }
+                currentGraphData = await response.json(); 
+                
+                if (currentGraphData.error_message) {
+                    statusMessageDiv.textContent = `API Error: ${currentGraphData.error_message}`;
+                    renderMermaidFromData([], [], currentGraphData.error_message, {}); 
+                } else {
+                    renderMermaidFromData(currentGraphData.nodes, currentGraphData.edges, null, {
+                        center_node_id: currentGraphData.center_node_id,
+                        start_node_id: currentGraphData.start_node_id,
+                        end_node_id: currentGraphData.end_node_id
+                    });
+                    statusMessageDiv.textContent = 'Graph loaded successfully.';
+                }
+            } catch (error) {
+                console.error('Error loading/rendering graph:', error);
+                const errorMessageText = `Error: ${error.message}. Check console for details.`;
+                renderMermaidFromData([], [], errorMessageText, {}); 
+                statusMessageDiv.textContent = errorMessageText;
+            }
+        }
+
+        function generateMermaidString(nodes, edges, context = {}) {
+            if (!nodes || nodes.length === 0) {
+                return `graph TD;\n  empty["No nodes to display or matching filter."];`;
+            }
+            let mermaidLines = ["graph TD;"];
+            const displayedNodeIds = new Set();
+
+            nodes.forEach(node => {
+                const nodeMermaidId = `N${node.id}`;
+                let nodeDisplayText = "";
+                if (node.label && String(node.label).trim() !== "") {
+                    nodeDisplayText = String(node.label);
+                } else if (node.name && String(node.name).trim() !== "") {
+                    nodeDisplayText = String(node.name);
+                } else {
+                    nodeDisplayText = `Node ${node.id}`; // Fallback
+                }
+                const sanitizedDisplayText = nodeDisplayText.replace(/"/g, '"'); // Escape double quotes
+                mermaidLines.push(`  ${nodeMermaidId}["${sanitizedDisplayText}"];`);
+                displayedNodeIds.add(node.id);
+
+                if (context.center_node_id && node.id === context.center_node_id) mermaidLines.push(`  style ${nodeMermaidId} fill:#ADD8E6,stroke:#333,stroke-width:2px;`);
+                else if (context.start_node_id && node.id === context.start_node_id) mermaidLines.push(`  style ${nodeMermaidId} fill:#90EE90,stroke:#333,stroke-width:2px;`);
+                else if (context.end_node_id && node.id === context.end_node_id) mermaidLines.push(`  style ${nodeMermaidId} fill:#F08080,stroke:#333,stroke-width:2px;`);
+            });
+
+            if (edges) {
+                const edgeGroups = new Map(); // Key: "sourceId-label", Value: { sourceId, label, targets: [targetId1, targetId2,...] }
+
+                edges.forEach(edge => {
+                    if (!displayedNodeIds.has(edge.source_id) || !displayedNodeIds.has(edge.target_id)) {
+                        return; // Skip edges not connecting displayed nodes
+                    }
+                    const groupKey = `S${edge.source_id}-L${edge.label || 'null'}`;
+                    if (!edgeGroups.has(groupKey)) {
+                        edgeGroups.set(groupKey, {
+                            source_id: edge.source_id,
+                            label: edge.label,
+                            targets: new Set() // Use a Set to store unique target IDs for this group
+                        });
+                    }
+                    edgeGroups.get(groupKey).targets.add(edge.target_id);
+                });
+
+                let fanOutNodeCounter = 0;
+                edgeGroups.forEach(group => {
+                    const sourceMermaidId = `N${group.source_id}`;
+                    const edgeLabel = group.label ? String(group.label) : '';
+                    const sanitizedEdgeLabel = edgeLabel.replace(/"/g, '"');
+
+                    if (group.targets.size === 1) {
+                        // Single target, draw direct edge
+                        const targetMermaidId = `N${Array.from(group.targets)[0]}`;
+                        mermaidLines.push(`  ${sourceMermaidId} ${sanitizedEdgeLabel ? '--"'+sanitizedEdgeLabel+'"-->' : '-->'} ${targetMermaidId};`);
+                    } else if (group.targets.size > 1) {
+                        // Multiple targets, create fan-out node
+                        fanOutNodeCounter++;
+                        const fanOutNodeId = `FO${group.source_id}_${fanOutNodeCounter}`;
+                        // Define the fan-out node (small, perhaps just the label or a symbol)
+                        // For simplicity, let's make it a small circle with the edge label if present
+                        const fanOutLabel = sanitizedEdgeLabel || "...";
+                        mermaidLines.push(`  ${fanOutNodeId}(("${fanOutLabel}"));`); // Small circle with label
+                        mermaidLines.push(`  style ${fanOutNodeId} fill:#eee,stroke:#333,stroke-width:1px,padding:5px;`);
+
+
+                        // Edge from source to fan-out node (can carry the original label or be unlabeled if fan-out shows it)
+                        mermaidLines.push(`  ${sourceMermaidId} --> ${fanOutNodeId};`);
+                        
+                        // Edges from fan-out node to actual targets
+                        group.targets.forEach(targetId => {
+                            const targetMermaidId = `N${targetId}`;
+                            mermaidLines.push(`  ${fanOutNodeId} --> ${targetMermaidId};`);
+                        });
+                    }
+                });
+            }
+            return mermaidLines.join('\\n');
+        }
+        
+        async function renderMermaidFromData(nodes, edges, errorMessage = null, context = {}) {
+            let mermaidString;
+            if (errorMessage) {
+                const messageStr = String(errorMessage); 
+                const safeErrorMessage = messageStr.replace(/"/g, "'").replace(/\n/g, " ");
+                mermaidString = `graph TD;\n  error_node["${safeErrorMessage}"];`;
+            } else {
+                 mermaidString = generateMermaidString(nodes, edges, context);
+            }
+            mermaidString = mermaidString.replace(/\\n/g, '\n'); 
+            mermaidGraphDiv.textContent = mermaidString;
+            mermaidGraphDiv.removeAttribute('data-processed');
+            await mermaid.run({ nodes: [mermaidGraphDiv] });
+            if (!errorMessage && nodes && edges) { 
+                 updateFilterControls(nodes, edges);
+            }
+        }
+        
+        document.getElementById('btnApplyClientFilters').addEventListener('click', () => {
+            if (!currentGraphData || !currentGraphData.nodes) {
+                statusMessageDiv.textContent = 'No graph data loaded to filter.';
+                return;
+            }
+            statusMessageDiv.textContent = 'Applying client filters...';
+
+            const selectedNodeItems = Array.from(selNodeFilterItems.selectedOptions).map(opt => opt.value);
+            const nodeFilterMode = document.querySelector('input[name="nodeFilterMode"]:checked').value;
+            
+            const selectedEdgeItems = Array.from(selEdgeFilterItems.selectedOptions).map(opt => opt.value);
+            const edgeFilterMode = document.querySelector('input[name="edgeFilterMode"]:checked').value;
+
+            let nodesToDisplay = currentGraphData.nodes;
+
+            if (nodeFilterMode !== 'show_all' && selectedNodeItems.length > 0) {
+                nodesToDisplay = currentGraphData.nodes.filter(node => {
+                    const displayVal = (node.label && String(node.label).trim() !== "") ? String(node.label) : String(node.name);
+                    const isSelected = selectedNodeItems.includes(displayVal);
+                    return nodeFilterMode === 'whitelist' ? isSelected : !isSelected;
+                });
+            }
+            
+            const displayedNodeIds = new Set(nodesToDisplay.map(n => n.id));
+            let edgesToDisplay = currentGraphData.edges.filter(edge => 
+                displayedNodeIds.has(edge.source_id) && displayedNodeIds.has(edge.target_id)
+            );
+
+            if (edgeFilterMode !== 'show_all' && selectedEdgeItems.length > 0) {
+                edgesToDisplay = edgesToDisplay.filter(edge => {
+                    const edgeLabel = edge.label ? String(edge.label) : ""; 
+                    const isSelected = selectedEdgeItems.includes(edgeLabel);
+                    return edgeFilterMode === 'whitelist' ? isSelected : !isSelected;
+                });
+            }
+            
+            const nodesInFinalEdges = new Set();
+            edgesToDisplay.forEach(edge => {
+                nodesInFinalEdges.add(edge.source_id);
+                nodesInFinalEdges.add(edge.target_id);
+            });
+
+            const finalNodes = nodesToDisplay.filter(node => 
+                 nodesInFinalEdges.has(node.id) || 
+                 (nodeFilterMode === 'whitelist' && selectedNodeItems.includes(node.label || node.name)) ||
+                 (nodeFilterMode === 'show_all' && selectedNodeItems.length === 0) 
+                 // If blacklisting, a node might be blacklisted but still shown if its edge is not.
+                 // This logic might need refinement based on desired behavior for blacklisted nodes in edges.
+                 // For now, if a node is part of a displayed edge, it's shown, overriding blacklist for that specific instance.
+                 // Or, if it was explicitly whitelisted.
+            );
+            
+            // Refined finalNodes logic:
+            // A node is shown if:
+            // 1. It's part of a displayed edge OR
+            // 2. Node filter is 'show_all' (and no specific items selected for whitelisting implicitly) OR
+            // 3. Node filter is 'whitelist' AND this node's display text is selected OR
+            // 4. Node filter is 'blacklist' AND this node's display text is NOT selected.
+            // AND it must have been in the initially `nodesToDisplay` (which respects the primary node filter)
+            
+            let trulyFinalNodes = nodesToDisplay.filter(node => {
+                const displayVal = node.label || node.name;
+                const isSelectedForNodeFilter = selectedNodeItems.includes(displayVal);
+
+                if (nodesInFinalEdges.has(node.id)) return true; // Always show if part of a displayed edge
+
+                if (nodeFilterMode === 'show_all') return true; // If no node filter, show (already filtered by initial nodesToDisplay)
+                if (nodeFilterMode === 'whitelist') return isSelectedForNodeFilter;
+                if (nodeFilterMode === 'blacklist') return !isSelectedForNodeFilter;
+                return false; // Should not happen
+            });
+
+
+            renderMermaidFromData(trulyFinalNodes, edgesToDisplay, null, {
+                center_node_id: currentGraphData.center_node_id,
+                start_node_id: currentGraphData.start_node_id,
+                end_node_id: currentGraphData.end_node_id
+            });
+            statusMessageDiv.textContent = `Filters applied. Displaying ${trulyFinalNodes.length} nodes and ${edgesToDisplay.length} edges.`;
+        });
+
+        document.getElementById('btnClearClientFilters').addEventListener('click', () => {
+            selNodeFilterItems.selectedIndex = -1; 
+            selEdgeFilterItems.selectedIndex = -1;
+            document.getElementById('nodeFilterShowAll').checked = true;
+            document.getElementById('edgeFilterShowAll').checked = true;
+            statusMessageDiv.textContent = 'Client filters cleared. Re-rendering current graph...';
+            renderMermaidFromData(currentGraphData.nodes, currentGraphData.edges, currentGraphData.error_message, {
+                 center_node_id: currentGraphData.center_node_id,
+                 start_node_id: currentGraphData.start_node_id,
+                 end_node_id: currentGraphData.end_node_id
+            });
+        });
+
+        document.getElementById('btnLoadFullGraph').addEventListener('click', () => loadAndRenderGraph('/api/graph'));
+        document.getElementById('btnLoadNodeCentric').addEventListener('click', () => {
+            const centerNode = selCenterNode.value;
+            const depth = document.getElementById('numNodeCentricDepth').value;
+            if (centerNode) loadAndRenderGraph(`/api/graph?center_node=${encodeURIComponent(centerNode)}&node_centric_depth=${depth}`);
+            else statusMessageDiv.textContent = 'Please select a center node.';
+        });
+        document.getElementById('btnLoadPathGraph').addEventListener('click', () => {
+            const startNode = selStartNode.value;
+            const endNode = selEndNode.value;
+            const pathMaxDepth = document.getElementById('numMaxDepth').value;
+            if (startNode && endNode) loadAndRenderGraph(`/api/graph?start_node=${encodeURIComponent(startNode)}&end_node=${encodeURIComponent(endNode)}&path_max_depth=${pathMaxDepth}`);
+            else statusMessageDiv.textContent = 'Please select both a start and an end node.';
+        });
+
+        populateNodeDropdowns();
+    </script>
+</body>
+</html>

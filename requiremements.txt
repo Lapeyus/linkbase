@@ -1,0 +1,7 @@
+google-adk==1.1.1
+litellm==1.71.1
+mcp==1.9.1
+requests==2.32.3
+beautifulsoup4==4.13.4
+fastapi==0.115.9
+uvicorn==0.34.3
