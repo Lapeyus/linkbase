@@ -8,28 +8,58 @@ entities (*nodes*) and the relationships between them (*edges*), and stores them
 database. A small FastAPI web app then lets you explore that graph interactively as a Mermaid
 diagram.
 
+It is aimed at developers and researchers who want a lightweight, inspectable way to build a
+personal knowledge graph from the web without running a graph database.
+
 ---
 
 ## Table of contents
 
-- [How it works](#how-it-works)
 - [Features](#features)
-- [Project layout](#project-layout)
+- [Architecture](#architecture)
+  - [Components](#components)
+  - [Ingestion and exploration flow](#ingestion-and-exploration-flow)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
-- [Running the agent](#running-the-agent)
-- [Running the graph viewer](#running-the-graph-viewer)
-- [HTTP API](#http-api)
-- [Data model](#data-model)
-- [Agent tools reference](#agent-tools-reference)
+- [Usage](#usage)
+  - [Running the agent](#running-the-agent)
+  - [Running the graph viewer](#running-the-graph-viewer)
+- [Reference](#reference)
+  - [HTTP API](#http-api)
+  - [Data model](#data-model)
+  - [Agent tools reference](#agent-tools-reference)
+- [Project layout](#project-layout)
 - [Logging](#logging)
+- [Tests](#tests)
+- [Project status](#project-status)
 - [Known limitations](#known-limitations)
 - [License](#license)
 
 ---
 
-## How it works
+## Features
+
+- **URL → knowledge graph.** Fetches and strips a page to plain text, then lets the LLM infer
+  entities and their relationships from context.
+- **Plain SQLite storage.** No graph database to run; the whole knowledge base is one `.db` file
+  you can query with any SQL client.
+- **Three graph views**, available both as agent tools and in the web UI:
+  - **Full graph** — everything in the database.
+  - **Node-centric** — a BFS neighbourhood around one node, to a configurable depth.
+  - **Paths** — every directed path between two nodes, up to a maximum length.
+- **Two output formats from the agent** — Graphviz **DOT** and **Mermaid** text, for whichever
+  renderer you prefer.
+- **Interactive viewer** — dropdowns for picking nodes, plus client-side whitelist/blacklist
+  filters on node and edge labels, applied without re-querying the server.
+- **Case-insensitive deduplication.** Node names are normalized, so `" New York City "` and
+  `"new york city"` are the same node.
+- **Swappable model.** Ships pointed at Gemini, but ADK's LiteLLM wrapper is already wired in for
+  local models via Ollama.
+
+## Architecture
+
+### Components
 
 ```mermaid
 graph TD;
@@ -51,41 +81,41 @@ The agent and the web viewer are two independent entry points over the same SQLi
 2. **Exploration** — the FastAPI server reads the same database and serves JSON, which the browser
    turns into a Mermaid diagram with filtering controls.
 
-## Features
+### Ingestion and exploration flow
 
-- **URL → knowledge graph.** Fetches and strips a page to plain text, then lets the LLM infer
-  entities and their relationships from context.
-- **Plain SQLite storage.** No graph database to run; the whole knowledge base is one `.db` file
-  you can query with any SQL client.
-- **Three graph views**, available both as agent tools and in the web UI:
-  - **Full graph** — everything in the database.
-  - **Node-centric** — a BFS neighbourhood around one node, to a configurable depth.
-  - **Paths** — every directed path between two nodes, up to a maximum length.
-- **Two output formats from the agent** — Graphviz **DOT** and **Mermaid** text, for whichever
-  renderer you prefer.
-- **Interactive viewer** — dropdowns for picking nodes, plus client-side whitelist/blacklist
-  filters on node and edge labels, applied without re-querying the server.
-- **Case-insensitive deduplication.** Node names are normalized, so `" New York City "` and
-  `"new york city"` are the same node.
-- **Swappable model.** Ships pointed at Gemini, but ADK's LiteLLM wrapper is already wired in for
-  local models via Ollama.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant ADK as ADK runner<br/>(adk web / adk run)
+    participant Agent as LlmAgent "linkbase"
+    participant LLM as Gemini (or LiteLLM model)
+    participant Web as Web page
+    participant DB as linkbase.db (SQLite)
+    participant API as FastAPI web_server.py
+    participant UI as graph_view.html
 
-## Project layout
+    Note over ADK,DB: Ingestion
+    User->>ADK: "Read <URL> and store the entities"
+    ADK->>Agent: user message
+    Agent->>LLM: prompt + tool definitions
+    LLM-->>Agent: call get_text_from_url(url)
+    Agent->>Web: HTTP GET (10s timeout)
+    Web-->>Agent: HTML → cleaned text
+    LLM-->>Agent: call get_db_schema / execute_sql(SELECT ...)
+    Agent->>DB: read schema and existing nodes
+    LLM-->>Agent: call execute_sql(INSERT nodes / edges)
+    Agent->>DB: write rows
+    Agent-->>User: summary, optional DOT/Mermaid graph
 
-```
-linkbase/
-├── linkbase/
-│   ├── __init__.py            # exposes `agent` so ADK discovers the package
-│   ├── agent.py               # LlmAgent definition: model, instruction, tool list
-│   ├── web_tools.py           # get_text_from_url — fetch + strip a page to plain text
-│   ├── db_tools.py            # SQLite schema, execute_sql, node/edge helpers
-│   ├── graph_tools.py         # graph queries + DOT / Mermaid generation
-│   ├── web_server.py          # FastAPI app: /api/graph, /api/nodes, /
-│   ├── logger_config.py       # root logger → linkbase/linkbase.log
-│   └── templates/
-│       └── graph_view.html    # single-page viewer (vanilla JS + Mermaid from CDN)
-├── requiremements.txt         # dependency list (filename typo is intentional/known)
-└── LICENSE
+    Note over API,UI: Exploration
+    User->>UI: open http://localhost:8080
+    UI->>API: GET /api/nodes
+    API->>DB: SELECT nodes
+    UI->>API: GET /api/graph?center_node=...&node_centric_depth=2
+    API->>DB: BFS / path queries
+    API-->>UI: JSON nodes + edges
+    UI->>UI: filter labels, build Mermaid text, render
 ```
 
 ## Requirements
@@ -104,16 +134,22 @@ linkbase/
 git clone https://github.com/lapeyus/linkbase.git
 cd linkbase
 
-python3.12 -m venv .env
-source .env/bin/activate          # Windows: .env\Scripts\activate
+python3.12 -m venv .venv
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
 
 pip install --upgrade pip
 pip install -r requiremements.txt
 ```
 
+> Use `.venv` (not `.env`) for the virtual environment: `.env` is the name of the configuration
+> file described below, and both are git-ignored.
+
 > The requirements file is named `requiremements.txt` (with the typo) in this repo — use it
 > verbatim. It does not list `python-dotenv`, which `agent.py` imports; it normally arrives as a
 > transitive dependency of `google-adk`, but if the import fails, `pip install python-dotenv`.
+> Likewise, in a fresh Python 3.12 environment built from these pins (checked October 2026),
+> importing `google-adk` 1.1.1 failed with `ModuleNotFoundError: No module named 'deprecated'`;
+> `pip install deprecated` fixes it.
 
 Pinned dependencies: `google-adk`, `litellm`, `mcp`, `requests`, `beautifulsoup4`, `fastapi`,
 `uvicorn`.
@@ -138,6 +174,9 @@ GOOGLE_CLOUD_PROJECT=your-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
+Files that stay local and out of Git: `.env`, `.venv/`, `linkbase/linkbase.log` (matched by
+`*.log`). `linkbase.db` is **not** in `.gitignore`; don't commit it by accident.
+
 ### Changing the model
 
 The model is hard-coded in `linkbase/agent.py:23`:
@@ -154,10 +193,13 @@ To run against a local model instead, uncomment the `LiteLlm` line and comment o
 Any [LiteLLM-supported](https://docs.litellm.ai/docs/providers) model string works; note that
 extraction quality depends heavily on the model's tool-calling ability.
 
-## Running the agent
+## Usage
+
+### Running the agent
 
 Run ADK from the **project root** (the directory that contains the `linkbase/` package) — ADK
-discovers the agent through `linkbase/__init__.py`, which re-exports `root_agent`.
+discovers the agent through `linkbase/__init__.py`, which imports the `agent` module where
+`root_agent` is defined.
 
 ```bash
 adk web            # browser chat UI at http://localhost:8000
@@ -168,7 +210,7 @@ adk run linkbase   # terminal chat
 On import, the agent calls `initialize_database()`, which creates `linkbase.db` in the **current
 working directory** if it doesn't exist yet.
 
-### Example prompts
+#### Example prompts
 
 ```
 Read https://en.wikipedia.org/wiki/Ada_Lovelace and store the entities and
@@ -184,7 +226,7 @@ Generate a DOT graph of the paths between "ada lovelace" and "united kingdom".
 How many nodes and edges are there in total?
 ```
 
-## Running the graph viewer
+### Running the graph viewer
 
 ```bash
 python -m linkbase.web_server
@@ -192,6 +234,10 @@ python -m linkbase.web_server
 
 Then open <http://localhost:8080>. Run it from the same working directory you ran the agent from,
 so it picks up the same `linkbase.db`.
+
+Because `linkbase/__init__.py` imports the agent module, starting the web server also loads
+`.env`, constructs the agent and runs `initialize_database()`, so the full dependency set must be
+installed even if you only want the viewer.
 
 The page gives you:
 
@@ -205,13 +251,15 @@ Colour conventions in the rendered diagram: the centered node is light blue, a p
 green, and its end node is red. When one source node has several targets sharing the same edge
 label, the viewer collapses them into a small circular fan-out node to keep the diagram readable.
 
-## HTTP API
+## Reference
 
-### `GET /`
+### HTTP API
+
+#### `GET /`
 
 Serves `linkbase/templates/graph_view.html`.
 
-### `GET /api/nodes`
+#### `GET /api/nodes`
 
 Returns every node, sorted by name — used to populate the UI dropdowns.
 
@@ -219,7 +267,7 @@ Returns every node, sorted by name — used to populate the UI dropdowns.
 [{ "id": 1, "name": "ada lovelace", "label": "Person" }]
 ```
 
-### `GET /api/graph`
+#### `GET /api/graph`
 
 Returns the node and edge lists for one of three views. The mode is chosen by which query
 parameters you pass:
@@ -250,9 +298,26 @@ Missing nodes and "no path found" are **not** HTTP errors — the response comes
 empty lists and a human-readable `error_message`. Only `/api/nodes` raises `500` when the database
 read fails outright.
 
-## Data model
+### Data model
 
 Two tables, created on first run by `initialize_database()`:
+
+```mermaid
+erDiagram
+    nodes ||--o{ edges : "source_id"
+    nodes ||--o{ edges : "target_id"
+    nodes {
+        INTEGER id PK
+        TEXT name UK "normalized: lowercase + strip"
+        TEXT label "type or display name"
+    }
+    edges {
+        INTEGER id PK
+        INTEGER source_id FK
+        INTEGER target_id FK
+        TEXT label "relation, UNIQUE with source and target"
+    }
+```
 
 ```sql
 CREATE TABLE nodes (
@@ -282,7 +347,7 @@ CREATE TABLE edges (
 - `linkbase.db` lives in the process's current working directory (`DB_FILE = "linkbase.db"`), so
   always start the agent and the web server from the same directory.
 
-### Helper functions
+#### Helper functions
 
 `db_tools.py` also provides `get_node_by_name()`, `get_or_create_node()` and
 `add_edge_if_not_exists()`, which handle normalization and deduplication for you. They are **not**
@@ -290,7 +355,7 @@ exposed to the agent — the agent writes through raw `execute_sql` — but they
 scripts, and `python -m linkbase.db_tools` runs a short demo that exercises them and prints the
 resulting schema, nodes and edges.
 
-## Agent tools reference
+### Agent tools reference
 
 | Tool | Signature | Purpose |
 |---|---|---|
@@ -307,6 +372,24 @@ resulting schema, nodes and edges.
 Every tool degrades to a descriptive string instead of raising, so the model can read the failure
 and retry.
 
+## Project layout
+
+```
+linkbase/
+├── linkbase/
+│   ├── __init__.py            # imports `agent` so ADK discovers root_agent
+│   ├── agent.py               # LlmAgent definition: model, instruction, tool list
+│   ├── web_tools.py           # get_text_from_url — fetch + strip a page to plain text
+│   ├── db_tools.py            # SQLite schema, execute_sql, node/edge helpers
+│   ├── graph_tools.py         # graph queries + DOT / Mermaid generation
+│   ├── web_server.py          # FastAPI app: /api/graph, /api/nodes, /
+│   ├── logger_config.py       # root logger → linkbase/linkbase.log
+│   └── templates/
+│       └── graph_view.html    # single-page viewer (vanilla JS + Mermaid from CDN)
+├── requiremements.txt         # dependency list (filename typo is intentional/known)
+└── LICENSE
+```
+
 ## Logging
 
 `logger_config.py` configures the **root** logger at import time, so every module that calls
@@ -320,6 +403,25 @@ the source, not in the working directory — with the format:
 There is no console handler by default; uncomment the `StreamHandler` block in
 `logger_config.py:33-36` if you want logs on stdout too. To change verbosity, call
 `setup_global_logger(logging.DEBUG)` — the SQL statements themselves are logged at `DEBUG`.
+
+## Tests
+
+**There are no automated tests.** The `__main__` block in `db_tools.py` is the closest thing to a
+smoke test:
+
+```bash
+python -m linkbase.db_tools
+```
+
+Run it from a scratch directory if you don't want it to create or modify the `linkbase.db` you use
+with the agent. Since importing the package imports the agent, this also needs the full
+dependency set installed.
+
+## Project status
+
+**Experiment, not actively developed.** The code was written in early June 2025 (two commits);
+the only later change is this documentation (2026). The model string points at a Gemini preview
+model from that time, which may need updating.
 
 ## Known limitations
 
@@ -340,10 +442,11 @@ anything sensitive:
   un-escapes them before rendering. Copy-pasting the raw tool output into a file may need a
   `\n` → newline pass first.
 - **`mcp` is pinned in the requirements but not used** anywhere in the code yet.
-- **There are no automated tests.** The `__main__` block in `db_tools.py` is the closest thing to a
-  smoke test.
+- **There are no automated tests.** See [Tests](#tests).
 - The agent's instruction describes node-centric graphs as showing "direct outgoing connections",
   but the implementation walks incoming edges too.
+- `gemini-2.5-pro-preview-05-06` is a dated preview model name; if the API rejects it, switch to a
+  current Gemini model in `agent.py`.
 
 ## License
 
